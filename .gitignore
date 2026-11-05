@@ -1,0 +1,29 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+
+# Secrets
+.env
+.env.*
+!.env.example
+
+# Node
+node_modules/
+dist/
+.vite/
+
+# Test output
+playwright-report/
+test-results/
+
+# Generated history
+backend/demo_site/fix_history.json
+
+# OS and editor
+.DS_Store
+Thumbs.db
+.vscode/

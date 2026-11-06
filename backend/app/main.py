@@ -1,11 +1,13 @@
 import asyncio
 import ipaddress
+import hmac
+import os
 import socket
 from urllib.parse import urlparse
 
 import httpx
 from bs4 import BeautifulSoup
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, Header, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, HttpUrl
 
@@ -474,7 +476,22 @@ def preview_seo_fix(request: FixPreviewRequest):
 
 
 @app.post("/api/fix/approve")
-def approve_seo_fix(request: FixApproveRequest):
+def approve_seo_fix(
+    request: FixApproveRequest,
+    human_approval_token: str | None = Header(
+        default=None, alias="X-SearchPilot-Human-Approval"
+    ),
+):
+    """Human-only approval endpoint; agent tools deliberately do not expose it."""
+    expected_token = os.environ.get("SEARCHPILOT_HUMAN_APPROVAL_TOKEN", "")
+    if not expected_token or not human_approval_token or not hmac.compare_digest(
+        human_approval_token, expected_token
+    ):
+        raise HTTPException(
+            status_code=403,
+            detail="A valid human approval token is required. No change was made.",
+        )
+
     pending = _PENDING_FIXES.get(request.preview_id)
 
     if pending is None:
@@ -577,3 +594,24 @@ def get_fix_history():
         history = []
 
     return {"history": history}
+
+
+# Local agent-callable SearchPilot tool surface. Approval is intentionally absent.
+@app.post("/api/tools/audit_website")
+async def tool_audit_website(request: AuditRequest):
+    return await audit_website(request)
+
+
+@app.post("/api/tools/create_fix_preview")
+def tool_create_fix_preview(request: FixPreviewRequest):
+    return preview_seo_fix(request)
+
+
+@app.get("/api/tools/verify_demo_fix")
+def tool_verify_demo_fix():
+    return verify_demo_fix()
+
+
+@app.get("/api/tools/get_fix_history")
+def tool_get_fix_history():
+    return get_fix_history()

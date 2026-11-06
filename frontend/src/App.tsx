@@ -1,14 +1,7 @@
-
 import { useEffect, useState } from "react";
 import "./App.css";
 
-type FixHistoryItem = {
-  issue_type: string;
-  new_value: string;
-  status: string;
-  target: string;
-  timestamp: string;
-};
+const API = "http://127.0.0.1:8000";
 
 type Issue = {
   title: string;
@@ -16,515 +9,189 @@ type Issue = {
   severity: "Critical" | "Warning" | "Passed";
   recommendation: string;
 };
+type Preview = {
+  preview_id: string;
+  issue_type: string;
+  before: string;
+  proposed: string;
+};
+type HistoryItem = {
+  issue_type: string;
+  new_value: string;
+  status: string;
+  target: string;
+  timestamp: string;
+};
+type Verification = { score: number; summary: { critical: number; warnings: number; passed: number }; issues: Issue[] };
+
+async function readResponse(response: Response) {
+  const data = await response.json();
+  if (!response.ok) throw new Error(data.detail || "Request failed. Is the SearchPilot backend running?");
+  return data;
+}
 
 function App() {
   const [url, setUrl] = useState("https://example.com");
   const [issues, setIssues] = useState<Issue[]>([]);
-  const [activeTab, setActiveTab] = useState("Overview");
+  const [score, setScore] = useState<number | null>(null);
   const [scanning, setScanning] = useState(false);
-  const [score, setScore] = useState(0);
-  const [approved, setApproved] = useState<string[]>([]);
-  const [fixing, setFixing] = useState(false);
-  const [showNotice, setShowNotice] = useState(false);
-  const [fixHistory, setFixHistory] = useState<FixHistoryItem[]>([]);
-  const [historyLoading, setHistoryLoading] = useState(true);
+  const [pending, setPending] = useState<Preview | null>(null);
+  const [proposed, setProposed] = useState("");
+  const [approvalToken, setApprovalToken] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [message, setMessage] = useState("");
+  const [error, setError] = useState("");
+  const [history, setHistory] = useState<HistoryItem[]>([]);
+  const [verification, setVerification] = useState<Verification | null>(null);
 
-  useEffect(() => {
-    fetch("http://127.0.0.1:8000/api/fix/history")
-      .then((response) => {
-        if (!response.ok) throw new Error("History could not be loaded");
-        return response.json();
-      })
-      .then((data) => setFixHistory(data.history || []))
-      .catch((error) => console.error("Fix History:", error))
-      .finally(() => setHistoryLoading(false));
-  }, []);
-
-
-  const criticalCount = issues.filter(
-    (issue) => issue.severity === "Critical"
-  ).length;
-
-  const warningCount = issues.filter(
-    (issue) => issue.severity === "Warning"
-  ).length;
-
-  const passedCount = issues.filter(
-    (issue) => issue.severity === "Passed"
-  ).length;
-
-
-
-  const handleScan = async () => {
-    let parsedUrl: URL;
-
+  const refreshHistory = async () => {
     try {
-      parsedUrl = new URL(url);
-      if (!["http:", "https:"].includes(parsedUrl.protocol)) {
-        throw new Error("Invalid protocol");
-      }
-    } catch {
-      alert("Please enter a valid website URL.");
-      return;
-    }
-
-    setScanning(true);
-    setShowNotice(false);
-
-    try {
-      const response = await fetch(
-        "http://127.0.0.1:8000/api/audit",
-        {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-          },
-          body: JSON.stringify({ url: parsedUrl.toString() }),
-        }
-      );
-
-      const data = await response.json();
-
-      if (!response.ok) {
-        throw new Error(
-          typeof data.detail === "string"
-            ? data.detail
-            : "SEO audit failed. Please try again."
-        );
-      }
-
-      setIssues(data.issues);
-      setScore(data.score);
-      setApproved([]);
-      setShowNotice(true);
-    } catch (error) {
-      alert(
-        error instanceof Error
-          ? error.message
-          : "Could not connect to the SEO backend."
-      );
-    } finally {
-      setScanning(false);
+      const data = await readResponse(await fetch(`${API}/api/tools/get_fix_history`));
+      setHistory(data.history ?? []);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Could not load fix history.");
     }
   };
 
-  const handleApprove = async (title: string) => {
-    const issueType = title.toLowerCase().includes("title")
-      ? "title"
-      : title.toLowerCase().includes("meta")
-        ? "meta_description"
-        : null;
+  useEffect(() => { void refreshHistory(); }, []);
 
-    if (!issueType) {
-      alert("This SEO fix type is not supported yet. Title and meta description fixes are currently available.");
-      return;
-    }
-
-    const proposedValue =
-      issueType === "title"
-        ? "SearchPilot | Professional SEO Audit and Optimization"
-        : "Discover practical SEO insights with SearchPilot. Audit your website, identify issues, and improve your search visibility with actionable recommendations.";
-
-    setFixing(true);
-
+  const scan = async () => {
+    setScanning(true); setError(""); setMessage(""); setVerification(null);
     try {
-      // Step 1: Generate preview
-      const previewResponse = await fetch(
-        "http://127.0.0.1:8000/api/fix/preview",
-        {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            issue_type: issueType,
-            proposed_value: proposedValue,
-          }),
-        }
-      );
+      const data = await readResponse(await fetch(`${API}/api/tools/audit_website`, {
+        method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ url }),
+      }));
+      setIssues(data.issues); setScore(data.score); setMessage(`Audit complete for ${data.url}. This scan is read-only.`);
+    } catch (e) { setError(e instanceof Error ? e.message : "Audit failed."); }
+    finally { setScanning(false); }
+  };
 
-      const previewData = await previewResponse.json();
+  const createPreview = async (issue: Issue) => {
+    const issueType = issue.title.toLowerCase().includes("title") ? "title" : issue.title.toLowerCase().includes("meta") ? "meta_description" : "";
+    if (!issueType) { setError("Preview fixes currently support page titles and meta descriptions."); return; }
+    const defaultValue = issueType === "title"
+      ? "SearchPilot | Professional SEO Audit and Optimization"
+      : "Discover practical SEO insights with SearchPilot. Audit your website, identify issues, and improve your search visibility with actionable recommendations.";
+    setBusy(true); setError(""); setMessage("");
+    try {
+      const data = await readResponse(await fetch(`${API}/api/tools/create_fix_preview`, {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ issue_type: issueType, proposed_value: defaultValue }),
+      }));
+      setPending(data); setProposed(data.proposed);
+    } catch (e) { setError(e instanceof Error ? e.message : "Could not create preview."); }
+    finally { setBusy(false); }
+  };
 
-      if (!previewResponse.ok) {
-        throw new Error(
-          typeof previewData.detail === "string"
-            ? previewData.detail
-            : "Could not generate fix preview."
-        );
+  const decide = async (approved: boolean, previewId?: string) => {
+    if (!pending) return;
+    setBusy(true); setError(""); setMessage("");
+    try {
+      const data = await readResponse(await fetch(`${API}/api/fix/approve`, {
+        method: "POST", headers: { "Content-Type": "application/json", "X-SearchPilot-Human-Approval": approvalToken },
+        body: JSON.stringify({ preview_id: previewId ?? pending.preview_id, approved }),
+      }));
+      setPending(null); setMessage(data.message);
+      if (approved && data.applied) {
+        const verified = await readResponse(await fetch(`${API}/api/tools/verify_demo_fix`));
+        setVerification(verified.audit); setIssues(verified.audit.issues); setScore(verified.audit.score);
+        setMessage(`Human-approved fix applied to the controlled demo site. Verification score: ${verified.audit.score}/100.`);
       }
+      await refreshHistory();
+    } catch (e) { setError(e instanceof Error ? e.message : "Could not record the human decision."); }
+    finally { setBusy(false); }
+  };
 
-      // Step 2: Ask for explicit human approval
-      const accepted = window.confirm(
-        `SEARCHPILOT FIX PREVIEW
-
-` +
-        `Issue: ${title}
-
-` +
-        `Current value:
-${previewData.before}
-
-` +
-        `Proposed value:
-${previewData.proposed}
-
-` +
-        `IMPORTANT: This will modify only the controlled SearchPilot demo website, not the public website you scanned.
-
-` +
-        `Do you approve this change?`
-      );
-
-      // Step 3: Send approval or rejection
-      const approvalResponse = await fetch(
-        "http://127.0.0.1:8000/api/fix/approve",
-        {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            preview_id: previewData.preview_id,
-            approved: accepted,
-          }),
-        }
-      );
-
-      const approvalData = await approvalResponse.json();
-
-      if (!approvalResponse.ok) {
-        throw new Error(
-          typeof approvalData.detail === "string"
-            ? approvalData.detail
-            : "Could not process approval."
-        );
-      }
-
-      if (!accepted) {
-        alert("Fix rejected. No website changes were made.");
-        return;
-      }
-
-      // Step 4: Re-audit after applying the approved fix
-      const verifyResponse = await fetch(
-        "http://127.0.0.1:8000/api/fix/verify"
-      );
-
-      const verifyData = await verifyResponse.json();
-
-      if (!verifyResponse.ok) {
-        throw new Error("Fix was applied, but verification failed.");
-      }
-
-      setIssues(verifyData.audit.issues);
-      setScore(verifyData.audit.score);
-      setApproved((current) =>
-        current.includes(title) ? current : [...current, title]
-      );
-      setShowNotice(true);
-
-      alert(
-        `Fix successfully applied!
-
-` +
-        `New SEO score: ${verifyData.audit.score}/100
-` +
-        `Website has been re-audited.`
-      );
-    } catch (error) {
-      alert(
-        error instanceof Error
-          ? error.message
-          : "Something went wrong while applying the SEO fix."
-      );
-    } finally {
-      setFixing(false);
+  const refreshAndDecide = async (approved: boolean) => {
+    if (!pending) return;
+    setBusy(true); setError("");
+    try {
+      const refreshed = await readResponse(await fetch(`${API}/api/tools/create_fix_preview`, {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ issue_type: pending.issue_type, proposed_value: proposed }),
+      }));
+      setPending(refreshed);
+      await decide(approved, refreshed.preview_id);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Could not refresh the preview.");
+      setBusy(false);
     }
   };
 
-  return (
-    <div className="app-shell">
-      <aside className="sidebar">
-        <div className="brand">
-          <div className="brand-icon">S</div>
-          <div>
-            <h2>SearchPilot</h2>
-            <span>SEO Intelligence</span>
-          </div>
-        </div>
+  const auditCounts = {
+    critical: issues.filter((x) => x.severity === "Critical").length,
+    warnings: issues.filter((x) => x.severity === "Warning").length,
+    passed: issues.filter((x) => x.severity === "Passed").length,
+  };
 
-        <div className="workspace-label">WORKSPACE</div>
+  return <div className="app-shell">
+    <aside className="sidebar">
+      <div className="brand"><div className="brand-icon">S</div><div><h2>SearchPilot</h2><span>SEO audit workspace</span></div></div>
+      <div className="workspace-label">WORKSPACE</div>
+      <nav className="navigation">
+        <a className="nav-item active" href="#workflow"><span className="nav-icon">▦</span>Workflow</a>
+        <a className="nav-item" href="#findings"><span className="nav-icon">⌕</span>Audit findings</a>
+        <a className="nav-item" href="#approval"><span className="nav-icon">✓</span>Approval</a>
+        <a className="nav-item" href="#history"><span className="nav-icon">◷</span>Fix history</a>
+      </nav>
+      <div className="sidebar-note"><strong>Demo safety boundary</strong><p>Website scans are read-only. Approved fixes can change only the local demo HTML file.</p></div>
+    </aside>
 
-        <nav className="navigation">
-          {[
-            ["Overview", "▦"],
-            ["SEO Audit", "⌕"],
-            ["AI Recommendations", "✧"],
-            ["Fix History", "◷"],
-          ].map(([name, icon]) => (
-            <button
-              key={name}
-              className={`nav-item ${activeTab === name ? "active" : ""}`}
-              onClick={() => setActiveTab(name)}
-            >
-              <span className="nav-icon">{icon}</span>
-              {name}
-            </button>
-          ))}
-        </nav>
+    <main className="main-content">
+      <header className="topbar"><div><div className="breadcrumb">SearchPilot / Local demo</div><h1>SEO improvement workflow</h1></div><span className="system-status"><span className="status-dot"/>Local backend</span></header>
+      <section id="workflow" className="welcome-section"><div><p className="eyebrow">SEARCHPILOT · SWITCH HACKATHON MVP</p><h2>Audit, review, verify.</h2><p className="muted">An agent can inspect and prepare a change. A human decides whether the demo site is updated.</p></div><span className="date-label">Human approval required</span></section>
 
-        <div className="sidebar-bottom">
-          <div className="help-card">
-            <div className="help-icon">?</div>
-            <strong>Need assistance?</strong>
-            <p>Explore your SEO audit workflow.</p>
-            <button onClick={() => alert("Help center coming soon.")}>
-              Visit Help Center →
-            </button>
-          </div>
+      <section className="website-panel">
+        <div className="website-panel-heading"><div><h3>Read-only website audit</h3><p>Scan a public page for SEO signals. This never writes to the scanned site.</p></div><span className="secure-label">READ ONLY</span></div>
+        <form className="scan-form" onSubmit={(event) => { event.preventDefault(); void scan(); }}>
+          <div className="url-input-wrapper"><span>↗</span><input value={url} onChange={(event) => setUrl(event.target.value)} placeholder="https://yourwebsite.com" aria-label="Website URL"/></div>
+          <button className="scan-button" disabled={scanning}>{scanning ? "Scanning…" : "Run SEO audit"}</button>
+        </form>
+        {scanning && <div className="scan-progress"><div className="progress-track"><div className="progress-fill"/></div><span>Fetching and analyzing HTML…</span></div>}
+        {message && <p className="inline-message" role="status">{message}</p>}
+        {error && <p className="inline-error" role="alert">{error}</p>}
+      </section>
 
-          <div className="profile">
-            <div className="avatar">SA</div>
-            <div className="profile-info">
-              <strong>SEO Admin</strong>
-              <span>Project workspace</span>
-            </div>
-            <span className="profile-menu">•••</span>
-          </div>
-        </div>
-      </aside>
+      <section className="section-heading"><div><h3>Audit overview</h3><p>{score === null ? "Run an audit to see current findings." : "Current read-only audit results."}</p></div><span className="updated-label">{score === null ? "Awaiting scan" : "Audit complete"}</span></section>
+      <section className="stats-grid">
+        <Stat title="SEO score" value={score === null ? "—" : `${score}/100`} icon="◉"/>
+        <Stat title="Critical issues" value={auditCounts.critical} icon="!" tone="red"/>
+        <Stat title="Warnings" value={auditCounts.warnings} icon="△" tone="orange"/>
+        <Stat title="Passed checks" value={auditCounts.passed} icon="✓" tone="green"/>
+      </section>
 
-      <main className="main-content">
-        <header className="topbar">
-          <div>
-            <div className="breadcrumb">Workspace / {activeTab}</div>
-            <h1>{activeTab}</h1>
-          </div>
+      <section id="findings" className="results-section">
+        <div className="section-heading results-heading"><div><h3>Audit findings</h3><p>Preview supported metadata fixes before a human approves them.</p></div><span className="result-count">{issues.length} checks</span></div>
+        {issues.length === 0 ? <div className="empty-panel">Your audit findings will appear here.</div> : <div className="issues-list">{issues.map((issue) => <article className="issue-row" key={issue.title}>
+          <div className={`issue-icon ${issue.severity.toLowerCase()}`}>{issue.severity === "Critical" ? "!" : issue.severity === "Warning" ? "△" : "✓"}</div>
+          <div className="issue-details"><div className="issue-title-line"><strong>{issue.title}</strong><span className={`severity ${issue.severity.toLowerCase()}`}>{issue.severity}</span></div><p>{issue.description}</p><div className="recommendation"><span>Recommendation:</span> {issue.recommendation}</div></div>
+          <div className="issue-action">{issue.severity === "Passed" ? <span className="passed-label">No action needed</span> : <button className="review-button" disabled={busy} onClick={() => void createPreview(issue)}>Create fix preview</button>}</div>
+        </article>)}</div>}
+      </section>
 
-          <div className="topbar-right">
-            <span className="system-status">
-              <span className="status-dot" />
-              System operational
-            </span>
-            <button className="notification-button" aria-label="Notifications">
-              ♧
-            </button>
-          </div>
-        </header>
+      <section id="approval" className="approval-panel">
+        <div className="fix-history-heading"><div><p className="eyebrow">CONTROLLED DEMO SITE</p><h2>Human review and approval</h2><p>SearchPilot never edits the public URL you scanned. Approval applies only to <code>backend/demo_site/index.html</code>.</p></div><span className="approval-state">{pending ? "Review pending" : "No pending change"}</span></div>
+        {pending ? <div className="preview-card">
+          <div className="preview-meta"><span>Change type</span><strong>{pending.issue_type.replace("_", " ")}</strong></div>
+          <label className="preview-field">Current value<input value={pending.before} readOnly/></label>
+          <label className="preview-field">Proposed value<textarea value={proposed} onChange={(event) => setProposed(event.target.value)} maxLength={pending.issue_type === "title" ? 60 : 160}/></label>
+          <small>{proposed.length} characters · Preview will be refreshed before approval.</small>
+          <label className="preview-field">Human approval token<input type="password" autoComplete="off" value={approvalToken} onChange={(event) => setApprovalToken(event.target.value)} placeholder="Set SEARCHPILOT_HUMAN_APPROVAL_TOKEN in backend environment"/></label>
+          <div className="approval-actions"><button disabled={busy || !approvalToken} className="review-button" onClick={() => void refreshAndDecide(false)}>Decline</button><button disabled={busy || !approvalToken || !proposed.trim()} className="scan-button" onClick={() => void refreshAndDecide(true)}>Approve and apply to demo</button></div>
+        </div> : <p className="empty-panel">Create a preview from an audit finding. No file changes until you explicitly approve.</p>}
+        {verification && <div className="verification-card"><strong>Verification after approval</strong><p>Demo audit score: <b>{verification.score}/100</b> · {verification.summary.critical} critical · {verification.summary.warnings} warnings · {verification.summary.passed} passed</p></div>}
+      </section>
 
-        <section className="welcome-section">
-          <div>
-            <p className="eyebrow">SEO PERFORMANCE CENTER</p>
-            <h2>Good to see you again.</h2>
-            <p className="muted">
-              Monitor your website health and discover opportunities to grow.
-            </p>
-          </div>
-          <div className="date-label">● Live workspace</div>
-        </section>
+      <section id="history" className="fix-history-section"><div className="fix-history-heading"><div><h2>Fix history</h2><p>Applied and declined changes for the controlled demo site.</p></div><span className="history-count">{history.length} records</span></div>
+        {history.length === 0 ? <p className="history-empty">No fix decisions recorded yet.</p> : <div className="history-list">{history.map((item, index) => <article className="history-item" key={`${item.timestamp}-${index}`}><div className="history-item-main"><strong>{item.issue_type.replace("_", " ")}</strong><span>{item.new_value}</span><small>{item.target} · {new Date(item.timestamp).toLocaleString()}</small></div><span className={`history-status ${item.status.toLowerCase()}`}>{item.status}</span></article>)}</div>}
+      </section>
+      <footer className="footer"><span>SearchPilot · Local demo only</span><span>Agent tools cannot approve fixes.</span></footer>
+    </main>
+  </div>;
+}
 
-        <section className="website-panel">
-          <div className="website-panel-heading">
-            <div>
-              <h3>Website Audit</h3>
-              <p>Enter a website URL to start an SEO audit.</p>
-            </div>
-            <span className="secure-label">⌑ Secure workspace</span>
-          </div>
-
-          <div className="scan-form">
-            <div className="url-input-wrapper">
-              <span>↗</span>
-              <input
-                value={url}
-                onChange={(event) => setUrl(event.target.value)}
-                placeholder="https://yourwebsite.com"
-                aria-label="Website URL"
-              />
-            </div>
-            <button
-              className="scan-button"
-              onClick={handleScan}
-              disabled={scanning}
-            >
-              {scanning ? "Scanning..." : "✧  Run SEO Audit"}
-            </button>
-          </div>
-
-          {scanning && (
-            <div className="scan-progress">
-              <div className="progress-track">
-                <div className="progress-fill" />
-              </div>
-              <span>Connecting to website and scanning SEO...</span>
-            </div>
-          )}
-
-          {showNotice && (
-            <p className="demo-notice">
-              Live SEO audit completed successfully using your FastAPI backend.
-            </p>
-          )}
-        </section>
-
-        <section className="section-heading">
-          <div>
-            <h3>Performance Overview</h3>
-            <p>Your website SEO health at a glance.</p>
-          </div>
-          <span className="updated-label">Live API</span>
-        </section>
-
-        <section className="stats-grid">
-          <div className="stat-card score-card">
-            <div className="stat-top">
-              <span>SEO Health Score</span>
-              <span className="stat-symbol">◉</span>
-            </div>
-            <div className="score-content">
-              <div className="score-number">{score}<small>/100</small></div>
-              <div className="score-ring">
-                <span>{score}</span>
-              </div>
-            </div>
-            <p className="stat-footnote">Based on live website audit</p>
-          </div>
-
-          <div className="stat-card">
-            <div className="stat-top">
-              <span>Critical Issues</span>
-              <span className="stat-symbol red">!</span>
-            </div>
-            <div className="stat-number">{criticalCount}</div>
-            <p className="stat-footnote">Require immediate attention</p>
-            <div className="stat-indicator red-bg" />
-          </div>
-
-          <div className="stat-card">
-            <div className="stat-top">
-              <span>Warnings</span>
-              <span className="stat-symbol orange">△</span>
-            </div>
-            <div className="stat-number">{warningCount}</div>
-            <p className="stat-footnote">Potential improvements</p>
-            <div className="stat-indicator orange-bg" />
-          </div>
-
-          <div className="stat-card">
-            <div className="stat-top">
-              <span>Passed Checks</span>
-              <span className="stat-symbol green">✓</span>
-            </div>
-            <div className="stat-number">{passedCount}</div>
-            <p className="stat-footnote">Checks looking healthy</p>
-            <div className="stat-indicator green-bg" />
-          </div>
-        </section>
-
-        <section className="results-section">
-          <div className="section-heading results-heading">
-            <div>
-              <h3>SEO Audit Findings</h3>
-              <p>Review detected issues and proposed improvements.</p>
-            </div>
-            <span className="result-count">{issues.length} checks</span>
-          </div>
-
-          <div className="issues-list">
-            {issues.map((issue) => (
-              <article className="issue-row" key={issue.title}>
-                <div className={`issue-icon ${issue.severity.toLowerCase()}`}>
-                  {issue.severity === "Critical"
-                    ? "!"
-                    : issue.severity === "Warning"
-                      ? "△"
-                      : "✓"}
-                </div>
-
-                <div className="issue-details">
-                  <div className="issue-title-line">
-                    <strong>{issue.title}</strong>
-                    <span className={`severity ${issue.severity.toLowerCase()}`}>
-                      {issue.severity}
-                    </span>
-                  </div>
-                  <p>{issue.description}</p>
-                  <div className="recommendation">
-                    <span>✧ AI suggestion:</span> {issue.recommendation}
-                  </div>
-                </div>
-
-                <div className="issue-action">
-                  {issue.severity === "Critical" ||
-                  issue.severity === "Warning" ? (
-                    <button
-                      className={
-                        approved.includes(issue.title)
-                          ? "approved-button"
-                          : "review-button"
-                      }
-                      onClick={() => handleApprove(issue.title)}
-                      disabled={approved.includes(issue.title) || fixing}
-                    >
-                      {approved.includes(issue.title)
-                        ? "✓ Approved"
-                        : fixing ? "Processing..." : "Preview & approve fix"}
-                    </button>
-                  ) : (
-                    <span className="passed-label">No action needed</span>
-                  )}
-                </div>
-              </article>
-            ))}
-          </div>
-
-          <div className="approval-notice">
-            <span className="approval-icon">♧</span>
-            <div>
-              <strong>Human approval is always required</strong>
-              <p>
-                Suggestions are not applied automatically. Approval here is
-                a demo interaction; actual website changes will be connected
-                later.
-              </p>
-            </div>
-          </div>
-        </section>
-
-        <section className="fix-history-section">
-          <div className="fix-history-heading">
-            <div>
-              <h2>Fix History</h2>
-              <p>Record of approved SEO changes</p>
-            </div>
-            <span className="history-count">{fixHistory.length} fixes</span>
-          </div>
-
-          {historyLoading ? (
-            <p className="history-empty">Loading fix history...</p>
-          ) : fixHistory.length === 0 ? (
-            <p className="history-empty">No approved fixes yet.</p>
-          ) : (
-            <div className="history-list">
-              {fixHistory.map((item, index) => (
-                <article className="history-item" key={`${item.timestamp}-${index}`}>
-                  <div className="history-item-main">
-                    <strong>{item.issue_type.replace("_", " ")}</strong>
-                    <span>{item.new_value}</span>
-                    <small>{item.target} · {new Date(item.timestamp).toLocaleString()}</small>
-                  </div>
-                  <span className="history-status">{item.status}</span>
-                </article>
-              ))}
-            </div>
-          )}
-        </section>
-
-        <footer className="footer">
-          <span>SearchPilot SEO Intelligence</span>
-          <span>Built for the SEO Audit-to-Fix project</span>
-        </footer>
-      </main>
-    </div>
-  );
+function Stat({ title, value, icon, tone = "" }: { title: string; value: string | number; icon: string; tone?: string }) {
+  return <div className="stat-card"><div className="stat-top"><span>{title}</span><span className={`stat-symbol ${tone}`}>{icon}</span></div><div className="stat-number">{value}</div><p className="stat-footnote">{title === "SEO score" ? "Based on latest audit" : "Latest audit"}</p></div>;
 }
 
 export default App;
-
-
